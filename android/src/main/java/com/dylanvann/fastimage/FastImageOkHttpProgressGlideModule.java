@@ -1,6 +1,11 @@
 package com.dylanvann.fastimage;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+
 import androidx.annotation.NonNull;
 
 import com.bumptech.glide.Glide;
@@ -9,13 +14,26 @@ import com.bumptech.glide.annotation.GlideModule;
 import com.bumptech.glide.integration.okhttp3.OkHttpUrlLoader;
 import com.bumptech.glide.load.model.GlideUrl;
 import com.bumptech.glide.module.LibraryGlideModule;
+import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.modules.network.OkHttpClientProvider;
 
+import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
+import java.sql.Array;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManagerFactory;
 
 import okhttp3.Interceptor;
 import okhttp3.MediaType;
@@ -33,16 +51,58 @@ import okio.Source;
 public class FastImageOkHttpProgressGlideModule extends LibraryGlideModule {
 
     private static DispatchingProgressListener progressListener = new DispatchingProgressListener();
+    private static SSLContext sslContext;
 
+    private static String[] certs= new String[]{"bypasscert","c4root","c4inter"};
     @Override
     public void registerComponents(
             @NonNull Context context,
             @NonNull Glide glide,
             @NonNull Registry registry
     ) {
+
+        // SSLFactory
+        try {
+            sslContext = SSLContext.getInstance("TLS");
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            String keyStoreType = KeyStore.getDefaultType();
+            KeyStore keyStore = KeyStore.getInstance(keyStoreType);
+            keyStore.load(null, null);
+
+            for (int i = 0; i < certs.length; i++) {
+                String filename = certs[i];
+                InputStream caInput = new BufferedInputStream(FastImageOkHttpProgressGlideModule.class.getClassLoader().getResourceAsStream("assets/" + filename + ".cer"));
+                Certificate ca;
+                try {
+                    ca = cf.generateCertificate(caInput);
+                } finally {
+                    caInput.close();
+                }
+
+                keyStore.setCertificateEntry(filename, ca);
+            }
+
+            String tmfAlgorithm = TrustManagerFactory.getDefaultAlgorithm();
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(tmfAlgorithm);
+            tmf.init(keyStore);
+
+            sslContext.init(null, tmf.getTrustManagers(), null);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
         OkHttpClient client = OkHttpClientProvider
                 .getOkHttpClient()
                 .newBuilder()
+                .sslSocketFactory(sslContext.getSocketFactory())
+                .hostnameVerifier(new HostnameVerifier() {
+                    @SuppressLint("BadHostnameVerifier")
+                    @Override
+                    public boolean verify(String s, SSLSession sslSession) {
+                        Log.d("ImageUrl",s );
+                        return true;
+                    }
+                })
                 .addInterceptor(createInterceptor(progressListener))
                 .build();
         OkHttpUrlLoader.Factory factory = new OkHttpUrlLoader.Factory(client);
@@ -80,6 +140,12 @@ public class FastImageOkHttpProgressGlideModule extends LibraryGlideModule {
         private final Map<String, FastImageProgressListener> LISTENERS = new WeakHashMap<>();
         private final Map<String, Long> PROGRESSES = new HashMap<>();
 
+        private final Handler handler;
+
+        DispatchingProgressListener() {
+            this.handler = new Handler(Looper.getMainLooper());
+        }
+
         void forget(String key) {
             LISTENERS.remove(key);
             PROGRESSES.remove(key);
@@ -99,7 +165,12 @@ public class FastImageOkHttpProgressGlideModule extends LibraryGlideModule {
                 forget(key);
             }
             if (needsDispatch(key, bytesRead, contentLength, listener.getGranularityPercentage())) {
-                listener.onProgress(key, bytesRead, contentLength);
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        listener.onProgress(key, bytesRead, contentLength);
+                    }
+                });
             }
         }
 
